@@ -1,0 +1,1177 @@
+openapi: 3.0.3
+info:
+  title: API del Servicio de Calendario Corporativo Multinacional
+  version: "1.0.0"
+  description: |
+    API REST del servicio de calendario corporativo para una empresa multinacional
+    (ISWZ2202 - Semana 9).
+
+    **Convenciones generales**
+    - **Versionado:** la versión mayor forma parte de la ruta (`/v1/...`).
+    - **Seguridad:** todas las operaciones, excepto `POST /v1/auth/login` y
+      `POST /v1/auth/refresh`, exigen un token JWT en la cabecera
+      `Authorization: Bearer <token>`. La autorización se basa en roles (RBAC):
+      `ADMIN`, `OWNER`, `EDITOR`, `VIEWER` e `INTEGRATION`.
+    - **Fechas y zonas horarias:** todas las fechas se intercambian en formato
+      ISO-8601 (RFC 3339) y se almacenan en **UTC** (sufijo `Z`). Cada evento
+      incluye además su zona horaria IANA de origen (`timezone`), utilizada para
+      expandir recurrencias y respetar los cambios de horario de verano. El
+      parámetro opcional `displayTimezone` permite obtener campos adicionales
+      convertidos a la hora local del usuario.
+    - **Recurrencias:** se expresan con reglas RRULE según RFC 5545.
+    - **Concurrencia:** control optimista mediante `ETag` / `If-Match`; un
+      conflicto de versión devuelve `409 Conflict`.
+    - **Errores:** todas las respuestas de error usan el esquema `Error`
+      (`code`, `message`, `timestamp`, `traceId`).
+  contact:
+    name: Equipo de Arquitectura - Servicio de Calendario
+  license:
+    name: Uso académico
+servers:
+  - url: https://api.calendario.empresa.com
+    description: Producción (enrutamiento geográfico multi-región)
+  - url: https://api.staging.calendario.empresa.com
+    description: Pre-producción
+tags:
+  - name: Autenticación
+    description: Inicio de sesión y renovación de tokens
+  - name: Calendarios
+    description: Gestión de calendarios y permisos de acceso
+  - name: Eventos
+    description: Gestión de eventos, recurrencias y zonas horarias
+  - name: Alertas
+    description: Consulta y gestión de alertas multi-dispositivo
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/auth/login:
+    post:
+      tags: [Autenticación]
+      summary: Inicia sesión y obtiene un token de acceso
+      description: |
+        Autentica al usuario con sus credenciales corporativas y devuelve un JWT de
+        acceso de vida corta (15 minutos) y un token de renovación rotativo.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: ana.perez@empresa.com
+              password: "S3guraP@ssw0rd"
+              mfaCode: "123456"
+      responses:
+        '200':
+          description: Autenticación correcta; se devuelven los tokens
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Credenciales o código MFA incorrectos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: AUTH_INVALID_CREDENTIALS
+                message: El correo, la contraseña o el código MFA no son válidos.
+                timestamp: "2026-11-24T15:00:00Z"
+                traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/auth/refresh:
+    post:
+      tags: [Autenticación]
+      summary: Renueva el token de acceso
+      operationId: refreshToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Tokens renovados
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /v1/calendars:
+    get:
+      tags: [Calendarios]
+      summary: Lista los calendarios a los que el usuario tiene acceso
+      operationId: listCalendars
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - name: role
+          in: query
+          required: false
+          description: Filtra por el rol que el usuario tiene sobre el calendario
+          schema:
+            $ref: '#/components/schemas/CalendarRole'
+      responses:
+        '200':
+          description: Lista paginada de calendarios
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalendarPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Calendarios]
+      summary: Crea un calendario
+      description: El usuario autenticado se convierte en propietario (`OWNER`) del calendario.
+      operationId: createCalendar
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CalendarCreate'
+            example:
+              name: Equipo de Arquitectura LATAM
+              description: Reuniones del equipo regional
+              defaultTimezone: America/Guayaquil
+              color: "#2B6CB0"
+      responses:
+        '201':
+          description: Calendario creado
+          headers:
+            Location:
+              description: URL del nuevo recurso
+              schema:
+                type: string
+                example: /v1/calendars/7f3c2a10-5b1e-4c8a-9d2f-1a2b3c4d5e6f
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Calendar'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/calendars/{calendarId}:
+    parameters:
+      - $ref: '#/components/parameters/CalendarId'
+    get:
+      tags: [Calendarios]
+      summary: Obtiene un calendario
+      operationId: getCalendar
+      responses:
+        '200':
+          description: Calendario encontrado
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Calendar'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Calendarios]
+      summary: Actualiza parcialmente un calendario
+      description: Requiere rol `OWNER` o `ADMIN`. Usa control de concurrencia optimista.
+      operationId: updateCalendar
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CalendarUpdate'
+      responses:
+        '200':
+          description: Calendario actualizado
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Calendar'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [Calendarios]
+      summary: Elimina un calendario
+      description: |
+        Requiere rol `OWNER` o `ADMIN`. Elimina el calendario y destruye su llave de
+        datos (borrado criptográfico).
+      operationId: deleteCalendar
+      responses:
+        '204':
+          description: Calendario eliminado
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/calendars/{calendarId}/events:
+    parameters:
+      - $ref: '#/components/parameters/CalendarId'
+    get:
+      tags: [Eventos]
+      summary: Lista los eventos de un calendario en un rango de fechas
+      description: |
+        Devuelve las ocurrencias (incluidas las expandidas de eventos recurrentes)
+        cuyo inicio está dentro del rango `[from, to)`. El rango máximo es de 93 días.
+        Las fechas se devuelven siempre en UTC; si se envía `displayTimezone`, se
+        añaden los campos `startLocal` y `endLocal` convertidos a esa zona.
+      operationId: listEvents
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Inicio del rango en ISO-8601 (UTC o con desplazamiento)
+          schema:
+            type: string
+            format: date-time
+            example: "2026-11-23T00:00:00Z"
+        - name: to
+          in: query
+          required: true
+          description: Fin del rango (exclusivo) en ISO-8601
+          schema:
+            type: string
+            format: date-time
+            example: "2026-11-30T00:00:00Z"
+        - $ref: '#/components/parameters/DisplayTimezone'
+        - name: expandRecurrences
+          in: query
+          required: false
+          description: Si es `true`, expande las recurrencias en ocurrencias individuales
+          schema:
+            type: boolean
+            default: true
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Lista paginada de eventos
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Eventos]
+      summary: Crea un evento (opcionalmente recurrente y con alertas)
+      description: |
+        Requiere rol `OWNER` o `EDITOR` sobre el calendario. Los campos sensibles
+        (título, descripción, ubicación, asistentes) se cifran antes de persistirse.
+        Tras confirmarse la creación se publica el evento de dominio `EventCreated`
+        y el Motor de Alertas programa las alertas solicitadas.
+      operationId: createEvent
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventCreate'
+            example:
+              title: Revisión semanal de arquitectura
+              description: Seguimiento de decisiones arquitectónicas
+              location: Sala virtual Teams
+              start: "2026-11-24T14:00:00Z"
+              end: "2026-11-24T15:00:00Z"
+              timezone: America/Guayaquil
+              allDay: false
+              recurrence:
+                rrule: "FREQ=WEEKLY;BYDAY=TU;COUNT=10"
+              attendees:
+                - email: carlos.ruiz@empresa.com
+                - email: marie.dupont@empresa.fr
+              alerts:
+                - minutesBefore: 15
+                  channels: [PUSH, WEB]
+                - minutesBefore: 1440
+                  channels: [EMAIL]
+      responses:
+        '201':
+          description: Evento creado
+          headers:
+            Location:
+              description: URL del nuevo evento
+              schema:
+                type: string
+                example: /v1/calendars/7f3c2a10-5b1e-4c8a-9d2f-1a2b3c4d5e6f/events/0b9d8e7f-1111-4a2b-8c3d-445566778899
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/calendars/{calendarId}/events/{eventId}:
+    parameters:
+      - $ref: '#/components/parameters/CalendarId'
+      - $ref: '#/components/parameters/EventId'
+    get:
+      tags: [Eventos]
+      summary: Obtiene un evento
+      operationId: getEvent
+      parameters:
+        - $ref: '#/components/parameters/DisplayTimezone'
+      responses:
+        '200':
+          description: Evento encontrado
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Eventos]
+      summary: Reemplaza un evento
+      description: |
+        Requiere rol `OWNER` o `EDITOR`. La cabecera `If-Match` debe contener el
+        `ETag` vigente; si otro usuario modificó el evento, se devuelve `409`.
+        El parámetro `scope` indica si el cambio afecta a una sola ocurrencia o a
+        toda la serie recurrente.
+      operationId: updateEvent
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+        - $ref: '#/components/parameters/RecurrenceScope'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventCreate'
+      responses:
+        '200':
+          description: Evento actualizado
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [Eventos]
+      summary: Cancela un evento
+      description: Publica el evento de dominio `EventCancelled` y anula sus alertas pendientes.
+      operationId: deleteEvent
+      parameters:
+        - $ref: '#/components/parameters/RecurrenceScope'
+        - name: occurrenceStart
+          in: query
+          required: false
+          description: Inicio UTC de la ocurrencia a cancelar (obligatorio si `scope` es `THIS` o `THIS_AND_FOLLOWING`)
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '204':
+          description: Evento cancelado
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/alerts:
+    get:
+      tags: [Alertas]
+      summary: Lista las alertas del usuario autenticado
+      description: |
+        Devuelve las alertas de todos los dispositivos del usuario. Útil para
+        sincronizar el estado (leída/no leída) entre la web y el móvil.
+      operationId: listAlerts
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/AlertStatus'
+        - name: from
+          in: query
+          required: false
+          description: Fecha mínima de disparo en ISO-8601
+          schema:
+            type: string
+            format: date-time
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Lista paginada de alertas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Alertas]
+      summary: Programa una alerta adicional sobre un evento
+      operationId: createAlert
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertCreate'
+            example:
+              calendarId: 7f3c2a10-5b1e-4c8a-9d2f-1a2b3c4d5e6f
+              eventId: 0b9d8e7f-1111-4a2b-8c3d-445566778899
+              minutesBefore: 30
+              channels: [PUSH, EMAIL]
+      responses:
+        '201':
+          description: Alerta programada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/alerts/{alertId}:
+    parameters:
+      - name: alertId
+        in: path
+        required: true
+        description: Identificador de la alerta
+        schema:
+          type: string
+          format: uuid
+    patch:
+      tags: [Alertas]
+      summary: Marca una alerta como leída o la pospone
+      description: |
+        El cambio se propaga a todos los dispositivos del usuario mediante el evento
+        `AlertAcknowledged`.
+      operationId: updateAlert
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertUpdate'
+            example:
+              status: SNOOZED
+              snoozeMinutes: 10
+      responses:
+        '200':
+          description: Alerta actualizada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Alertas]
+      summary: Elimina una alerta programada
+      operationId: deleteAlert
+      responses:
+        '204':
+          description: Alerta eliminada
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT firmado con RS256 emitido por `POST /v1/auth/login`. Vigencia de 15
+        minutos. Incluye los claims `sub` (usuario), `tenant` (filial) y `roles`.
+
+  parameters:
+    CalendarId:
+      name: calendarId
+      in: path
+      required: true
+      description: Identificador del calendario
+      schema:
+        type: string
+        format: uuid
+    EventId:
+      name: eventId
+      in: path
+      required: true
+      description: Identificador del evento
+      schema:
+        type: string
+        format: uuid
+    Page:
+      name: page
+      in: query
+      required: false
+      description: Número de página (comienza en 1)
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Elementos por página
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    DisplayTimezone:
+      name: displayTimezone
+      in: query
+      required: false
+      description: |
+        Zona horaria IANA en la que el cliente desea ver las fechas (por ejemplo
+        `Europe/Madrid`). No altera los valores UTC almacenados.
+      schema:
+        type: string
+        example: Europe/Madrid
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: ETag de la versión que el cliente pretende modificar (concurrencia optimista)
+      schema:
+        type: string
+        example: '"7"'
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Clave única generada por el cliente para que los reintentos no dupliquen recursos
+      schema:
+        type: string
+        format: uuid
+    RecurrenceScope:
+      name: scope
+      in: query
+      required: false
+      description: Alcance del cambio en un evento recurrente
+      schema:
+        type: string
+        enum: [THIS, THIS_AND_FOLLOWING, ALL]
+        default: ALL
+
+  headers:
+    ETag:
+      description: Versión actual del recurso, usada para concurrencia optimista
+      schema:
+        type: string
+        example: '"7"'
+
+  responses:
+    BadRequest:
+      description: Petición mal formada o con datos inválidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VALIDATION_ERROR
+            message: "El campo 'end' debe ser posterior a 'start' y estar en formato ISO-8601."
+            timestamp: "2026-11-24T15:00:00Z"
+            traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+            details:
+              - field: end
+                issue: debe ser posterior a start
+    Unauthorized:
+      description: Token ausente, inválido o expirado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: AUTH_TOKEN_EXPIRED
+            message: El token de acceso ha expirado. Renueve la sesión.
+            timestamp: "2026-11-24T15:00:00Z"
+            traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+    Forbidden:
+      description: El usuario está autenticado pero su rol no permite la operación
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: RBAC_FORBIDDEN
+            message: Se requiere el rol OWNER o EDITOR sobre este calendario.
+            timestamp: "2026-11-24T15:00:00Z"
+            traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+    NotFound:
+      description: El recurso no existe o no pertenece al inquilino del usuario
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: RESOURCE_NOT_FOUND
+            message: El calendario solicitado no existe.
+            timestamp: "2026-11-24T15:00:00Z"
+            traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+    Conflict:
+      description: Conflicto de versión (ETag) o recurso duplicado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: VERSION_CONFLICT
+            message: El evento fue modificado por otro usuario. Versión actual 8.
+            timestamp: "2026-11-24T15:00:00Z"
+            traceId: 4bf92f3577b34da6a3ce929d0e0e4736
+    TooManyRequests:
+      description: Se superó el límite de peticiones
+      headers:
+        Retry-After:
+          description: Segundos que el cliente debe esperar
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      description: Error estructurado común a toda la API
+      required: [code, message, timestamp, traceId]
+      properties:
+        code:
+          type: string
+          description: Código de error estable y legible por máquinas
+          example: VALIDATION_ERROR
+        message:
+          type: string
+          description: Mensaje comprensible para el usuario (localizado según Accept-Language)
+        timestamp:
+          type: string
+          format: date-time
+          description: Momento del error en UTC (ISO-8601)
+          example: "2026-11-24T15:00:00Z"
+        traceId:
+          type: string
+          description: Identificador de traza distribuida para soporte y diagnóstico
+          example: 4bf92f3577b34da6a3ce929d0e0e4736
+        details:
+          type: array
+          description: Detalle opcional por campo
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              issue:
+                type: string
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 8
+        mfaCode:
+          type: string
+          pattern: '^[0-9]{6}$'
+          description: Código MFA de 6 dígitos (obligatorio para roles administrativos)
+
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken:
+          type: string
+
+    TokenResponse:
+      type: object
+      required: [accessToken, tokenType, expiresIn, refreshToken]
+      properties:
+        accessToken:
+          type: string
+          description: JWT de acceso
+        tokenType:
+          type: string
+          enum: [Bearer]
+        expiresIn:
+          type: integer
+          description: Vigencia del token en segundos
+          example: 900
+        refreshToken:
+          type: string
+        user:
+          $ref: '#/components/schemas/UserSummary'
+
+    UserSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        displayName:
+          type: string
+        tenant:
+          type: string
+          description: Filial o inquilino al que pertenece el usuario
+          example: EC
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [ADMIN, USER, INTEGRATION]
+        preferredTimezone:
+          type: string
+          example: America/Guayaquil
+        locale:
+          type: string
+          example: es-EC
+
+    CalendarRole:
+      type: string
+      enum: [OWNER, EDITOR, VIEWER]
+
+    CalendarCreate:
+      type: object
+      required: [name, defaultTimezone]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        description:
+          type: string
+          maxLength: 1000
+        defaultTimezone:
+          type: string
+          description: Zona horaria IANA por defecto del calendario
+          example: America/Guayaquil
+        color:
+          type: string
+          pattern: '^#[0-9A-Fa-f]{6}$'
+
+    CalendarUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        description:
+          type: string
+          maxLength: 1000
+        defaultTimezone:
+          type: string
+        color:
+          type: string
+          pattern: '^#[0-9A-Fa-f]{6}$'
+
+    Calendar:
+      allOf:
+        - $ref: '#/components/schemas/CalendarCreate'
+        - type: object
+          required: [id, ownerId, myRole, version, createdAt, updatedAt]
+          properties:
+            id:
+              type: string
+              format: uuid
+            ownerId:
+              type: string
+              format: uuid
+            myRole:
+              $ref: '#/components/schemas/CalendarRole'
+            version:
+              type: integer
+              description: Versión para concurrencia optimista
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+
+    CalendarPage:
+      type: object
+      required: [items, page, limit, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Calendar'
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+
+    Recurrence:
+      type: object
+      required: [rrule]
+      properties:
+        rrule:
+          type: string
+          description: Regla de recurrencia RFC 5545 (sin el prefijo `RRULE:`)
+          example: "FREQ=WEEKLY;BYDAY=TU;COUNT=10"
+        exdates:
+          type: array
+          description: Ocurrencias excluidas (inicio en UTC)
+          items:
+            type: string
+            format: date-time
+
+    Attendee:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+        displayName:
+          type: string
+        responseStatus:
+          type: string
+          enum: [NEEDS_ACTION, ACCEPTED, DECLINED, TENTATIVE]
+          default: NEEDS_ACTION
+        timezone:
+          type: string
+          description: Zona horaria IANA del asistente (informativa)
+          example: Europe/Paris
+
+    AlertChannel:
+      type: string
+      enum: [PUSH, WEB, EMAIL, WEBHOOK]
+
+    EventAlert:
+      type: object
+      required: [minutesBefore, channels]
+      properties:
+        minutesBefore:
+          type: integer
+          minimum: 0
+          maximum: 40320
+          description: Minutos antes del inicio de cada ocurrencia
+        channels:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/AlertChannel'
+
+    EventCreate:
+      type: object
+      required: [title, start, end, timezone]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Dato sensible; se almacena cifrado
+        description:
+          type: string
+          maxLength: 5000
+          description: Dato sensible; se almacena cifrado
+        location:
+          type: string
+          maxLength: 300
+          description: Dato sensible; se almacena cifrado
+        start:
+          type: string
+          format: date-time
+          description: Inicio en ISO-8601; se normaliza y almacena en UTC
+          example: "2026-11-24T14:00:00Z"
+        end:
+          type: string
+          format: date-time
+          description: Fin en ISO-8601; debe ser posterior a `start`
+          example: "2026-11-24T15:00:00Z"
+        timezone:
+          type: string
+          description: Zona horaria IANA de origen del evento, usada para expandir recurrencias y DST
+          example: America/Guayaquil
+        allDay:
+          type: boolean
+          default: false
+        recurrence:
+          $ref: '#/components/schemas/Recurrence'
+        attendees:
+          type: array
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/Attendee'
+        alerts:
+          type: array
+          maxItems: 5
+          items:
+            $ref: '#/components/schemas/EventAlert'
+        visibility:
+          type: string
+          enum: [DEFAULT, PRIVATE, CONFIDENTIAL]
+          default: DEFAULT
+
+    Event:
+      allOf:
+        - $ref: '#/components/schemas/EventCreate'
+        - type: object
+          required: [id, calendarId, organizerId, version, createdAt, updatedAt]
+          properties:
+            id:
+              type: string
+              format: uuid
+            calendarId:
+              type: string
+              format: uuid
+            organizerId:
+              type: string
+              format: uuid
+            recurrenceId:
+              type: string
+              format: date-time
+              description: Inicio UTC original de la ocurrencia (solo en ocurrencias expandidas)
+            startLocal:
+              type: string
+              description: Inicio convertido a `displayTimezone` (ISO-8601 con desplazamiento)
+              example: "2026-11-24T15:00:00+01:00"
+            endLocal:
+              type: string
+              description: Fin convertido a `displayTimezone`
+              example: "2026-11-24T16:00:00+01:00"
+            status:
+              type: string
+              enum: [CONFIRMED, TENTATIVE, CANCELLED]
+            version:
+              type: integer
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+
+    EventPage:
+      type: object
+      required: [items, page, limit, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+        displayTimezone:
+          type: string
+          description: Zona horaria aplicada a los campos locales, si se solicitó
+
+    AlertStatus:
+      type: string
+      enum: [SCHEDULED, SENT, DELIVERED, READ, SNOOZED, CANCELLED, FAILED]
+
+    AlertCreate:
+      type: object
+      required: [calendarId, eventId, minutesBefore, channels]
+      properties:
+        calendarId:
+          type: string
+          format: uuid
+        eventId:
+          type: string
+          format: uuid
+        minutesBefore:
+          type: integer
+          minimum: 0
+          maximum: 40320
+        channels:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/AlertChannel'
+
+    AlertUpdate:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [READ, SNOOZED]
+        snoozeMinutes:
+          type: integer
+          minimum: 1
+          maximum: 1440
+          description: Obligatorio cuando `status` es `SNOOZED`
+
+    Alert:
+      type: object
+      required: [id, calendarId, eventId, triggerAt, channels, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        calendarId:
+          type: string
+          format: uuid
+        eventId:
+          type: string
+          format: uuid
+        occurrenceStart:
+          type: string
+          format: date-time
+          description: Inicio UTC de la ocurrencia a la que se refiere la alerta
+        triggerAt:
+          type: string
+          format: date-time
+          description: Momento de disparo en UTC
+          example: "2026-11-24T13:45:00Z"
+        channels:
+          type: array
+          items:
+            $ref: '#/components/schemas/AlertChannel'
+        status:
+          $ref: '#/components/schemas/AlertStatus'
+        deliveredTo:
+          type: array
+          description: Dispositivos en los que se entregó la alerta
+          items:
+            type: object
+            properties:
+              deviceId:
+                type: string
+              platform:
+                type: string
+                enum: [IOS, ANDROID, WEB, EMAIL]
+              deliveredAt:
+                type: string
+                format: date-time
+
+    AlertPage:
+      type: object
+      required: [items, page, limit, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Alert'
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
